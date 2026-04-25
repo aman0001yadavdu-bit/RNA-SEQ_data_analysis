@@ -1,4 +1,5 @@
 RNA-SEQ_data_analysis
+
 SKILLS LEARED:
 These are python code for the RNA-SEQ data analysis, i learned python  programming basics, learned some basics regarding scikit-learn, feature selection (univariate, embedded, wrapper methods), i used 9 machine learning models in this analysis
 

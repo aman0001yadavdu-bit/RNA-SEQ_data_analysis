@@ -41,8 +41,9 @@ import xgboost as xgb
 
 from google.colab import files
 from matplotlib.backends.backend_pdf import PdfPages
+from sklearn.model_selection import GridSearchCV
 
-print("✅  All libraries loaded.\n")
+print(" All libraries loaded.\n")
 
 # ════════════════════════════════════════════════════════════
 #  STEP 1 : Upload & Parse Excel
@@ -67,23 +68,21 @@ def find_row(df, kw):
 
 disease_row = find_row(raw_df, "disease")
 if disease_row is None:
-    raise ValueError("❌  'Disease' row not found. Check your Excel.")
+    raise ValueError("  'Disease' row not found. Check your Excel.")
 
 y_series    = raw_df.loc[disease_row].astype(float)
 rows_to_drop = [find_row(raw_df, r) for r in SPECIAL_ROWS if find_row(raw_df, r)]
 expr_df      = raw_df.drop(index=rows_to_drop)
 expr_df      = expr_df.apply(pd.to_numeric, errors="coerce").fillna(0)
 
-# ── FIX: strip NaN and any value that is not 0 or 1 ─────────
-# The Disease row often contains NaN in the Gene_id/index column
-# which converts to a huge negative int and creates a phantom 3rd class.
+
 y_series = y_series.dropna()
 y_series = y_series[y_series.isin([0.0, 1.0])]
 
 # Keep only samples that appear in both the expression matrix and y
 common_cols = expr_df.columns.intersection(y_series.index)
 if len(common_cols) == 0:
-    raise ValueError("❌  No overlapping sample columns between expression data "
+    raise ValueError("  No overlapping sample columns between expression data "
                      "and Disease row. Check that sample names match.")
 expr_df  = expr_df[common_cols]
 y_series = y_series[common_cols]
@@ -99,19 +98,21 @@ print(f"   Unique y values   : {sorted(y_series.unique().tolist())}  ← should 
 
 # Sanity checks
 if n_ctrl == 0 or n_dis == 0:
-    raise ValueError("❌  Only one class found in Disease row. "
+    raise ValueError("  Only one class found in Disease row. "
                      "Need both 0 and 1 labels.")
 if n_samples < 10:
-    print(f"\n⚠️  WARNING: Only {n_samples} samples — results may be unreliable.")
+    print(f"\n  WARNING: Only {n_samples} samples — results may be unreliable.")
     print("   Consider LOOCV (option 3) for cross-validation.")
 
 # ════════════════════════════════════════════════════════════
-#  STEP 2 : Log2 Normalisation  (no scaler yet — goes inside Pipeline)
+#  STEP 2 : Log2 Normalisation  
 # ════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print("  STEP 2 – Log2(x+1) Normalisation")
 print("=" * 60)
 
+# ── FIX: Actually perform the Log2(x+1) calculation ─────────
+log_df = np.log2(expr_df + 1)
 # ── Final y cleanup: guarantee clean 0/1 int array ──────────
 # Encodes with LabelEncoder so XGBoost always sees {0,1}
 from sklearn.preprocessing import LabelEncoder
@@ -170,14 +171,6 @@ if N_SPLITS > min_class_train:
 
 # ════════════════════════════════════════════════════════════
 #  STEP 5 : Feature Selection  ← NOW LEAK-FREE via Pipeline
-#
-#  How it works:
-#  • A Pipeline is [Scaler → FS selector → Classifier].
-#  • cross_val_score / cross_val_predict runs the ENTIRE
-#    pipeline inside each fold, so the selector only sees
-#    the fold's training split — never the validation split.
-#  • For the final test-set evaluation, the pipeline is
-#    re-fit on ALL of X_train (still blind to X_test).
 # ════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print("  STEP 5 – Feature Selection (leak-free, inside Pipeline)")
@@ -192,7 +185,7 @@ print(f"\n   Dataset summary:")
 print(f"     Total genes (features) : {total_genes}")
 print(f"     Training samples       : {X_train.shape[0]}")
 print(f"     Smallest class size    : {min_cls}")
-print(f"\n   ⚠️  Rule of thumb for small datasets:")
+print(f"\n     Rule of thumb for small datasets:")
 print(f"      Select at most ~{max_safe} features to avoid overfitting")
 print(f"      (more features than samples → high overfitting risk)")
 print(f"\n   Enter number of top genes to select per FS method.")
@@ -208,8 +201,7 @@ if N_FEATURES >= total_genes:
     print("   ℹ️  All genes selected — effective feature selection is off.")
     print("      Consider selecting fewer features for a more meaningful comparison.")
 
-# ── Helper: fit selector on full X_train, return gene list ──
-# (used only for the output Excel / inspection, NOT for CV metrics)
+
 def get_selected_genes_filter(X_tr, y_tr, k):
     scaler  = StandardScaler()
     Xs      = scaler.fit_transform(X_tr)
@@ -255,15 +247,11 @@ print(f"   Wrapper genes   : {len(wrapper_genes)}")
 print(f"   Embedded genes  : {len(embedded_genes)}")
 print(f"   Overlap (all 3) : {len(overlap_all)} genes")
 
-# ── FS selector objects used INSIDE pipelines ────────────────
-# These are re-instantiated fresh every time the pipeline runs
+
 
 def make_filter_selector(k):
     """Combined univariate: picks top-k by avg(ANOVA-F rank, MI rank)."""
-    # sklearn doesn't natively combine two selectors, so we use a
-    # FunctionTransformer wrapper approach with SelectKBest on f_classif
-    # (MI is used for the standalone gene list; pipeline uses ANOVA-F
-    # which is fast, deterministic, and well-validated for expression data)
+   
     return SelectKBest(f_classif, k=k)
 
 def make_wrapper_selector(k):
@@ -346,18 +334,10 @@ print(f"✅  Saved → '{FS_OUTPUT}'")
 print("\n" + "=" * 60)
 print("  STEP 7 – Model Training (Pipeline, no leakage)")
 print("=" * 60)
-print("""
-  ┌─────────────────────────────────────────────────────────┐
-  │  Each Pipeline = [StandardScaler → FS selector → Model] │
-  │  cross_val_predict runs the FULL pipeline inside every   │
-  │  CV fold, so the feature selector NEVER sees the         │
-  │  validation fold — overfitting from FS is prevented.     │
-  └─────────────────────────────────────────────────────────┘
-""")
 
 MODELS = {
     "Logistic Regression":  LogisticRegression(C=1.0, max_iter=1000,
-                                                solver="liblinear", random_state=42),
+                                               solver="liblinear", random_state=42),
     "SVM":                  SVC(C=1.0, probability=True, random_state=42),
     "Random Forest":        RandomForestClassifier(n_estimators=200,
                                                    max_depth=6,        # regularised
@@ -365,14 +345,14 @@ MODELS = {
                                                    random_state=42, n_jobs=-1),
     "K-Nearest Neighbours": KNeighborsClassifier(n_neighbors=7),       # odd k, larger
     "Naïve Bayes":          GaussianNB(),
-    "Decision Tree":        DecisionTreeClassifier(max_depth=5,         # regularised
+    "Decision Tree":        DecisionTreeClassifier(max_depth=5,        # regularised
                                                    min_samples_leaf=3,
                                                    random_state=42),
     "Gradient Boosting":    GradientBoostingClassifier(n_estimators=100,
-                                                        learning_rate=0.1,
-                                                        max_depth=3,    # regularised
-                                                        subsample=0.8,
-                                                        random_state=42),
+                                                       learning_rate=0.1,
+                                                       max_depth=3,    # regularised
+                                                       subsample=0.8,
+                                                       random_state=42),
     "XGBoost":              xgb.XGBClassifier(n_estimators=100,
                                                max_depth=4,             # regularised
                                                learning_rate=0.1,
@@ -393,8 +373,6 @@ METRICS_ORDER = ["Accuracy","Sensitivity","Specificity",
 
 def compute_metrics(y_true, y_pred, y_prob):
     """Safe metric computation — handles small / imbalanced test sets."""
-    # Force labels=[0,1] so confusion matrix is always 2×2
-    # even if one class is absent in a tiny test set
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
     return dict(
@@ -411,11 +389,13 @@ PALETTE = ["#E63946","#2196F3","#4CAF50","#FF9800","#9C27B0",
 
 all_results = {}
 roc_data    = {}
+pipeline_selected_genes = {} # <-- NEW: Dictionary to store genes for ALL models
 
 for fs_name, make_selector in FS_PIPELINE_SELECTORS.items():
     print(f"\n  ── FS: {fs_name} ──")
     all_results[fs_name] = {}
     roc_data[fs_name]    = {}
+    pipeline_selected_genes[fs_name] = {} # <-- NEW: Initialize for this FS method
 
     for model_name, clf in MODELS.items():
         try:
@@ -436,6 +416,13 @@ for fs_name, make_selector in FS_PIPELINE_SELECTORS.items():
 
             # ── Final fit on ALL of X_train, evaluate on X_test ─
             pipe.fit(X_train, y_train)
+            
+            # <-- NEW: Extract the exact genes selected by this pipeline's final fit
+            support = pipe.named_steps["selector"].get_support()
+            sel_genes = [gene_names[i] for i, keep in enumerate(support) if keep]
+            pipeline_selected_genes[fs_name][model_name] = sel_genes
+            # ------------------------------------------------------------------------
+
             y_pred = pipe.predict(X_test)
             y_prob = pipe.predict_proba(X_test)[:, 1]
 
@@ -465,10 +452,6 @@ print("\n⚠️  Note: A large |Gap(Test-CV)| > 0.10 may indicate overfitting.")
 
 # ════════════════════════════════════════════════════════════
 #  STEP 8A : ROC Curves PDF
-#  Layout:
-#    Page 1  – Cover / table of contents
-#    Pages 2-4 – One full page per FS method (all 9 models)
-#    Page 5  – 3-panel summary (all methods side-by-side)
 # ════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print("  STEP 8A – ROC Curves PDF")
@@ -547,7 +530,7 @@ with PdfPages(ROC_PDF) as pdf:
         plt.tight_layout(rect=[0, 0.18, 1, 1])
         pdf.savefig(fig, dpi=180, bbox_inches="tight")
         plt.close(fig)
-        print(f"   📄  Page saved: {fs_name}")
+        print(f"     Page saved: {fs_name}")
 
     # ── Page 5 : 3-panel side-by-side ──────────────────────
     fig, axes = plt.subplots(1, 3, figsize=(19, 7))
@@ -559,7 +542,7 @@ with PdfPages(ROC_PDF) as pdf:
     plt.tight_layout()
     pdf.savefig(fig, dpi=180, bbox_inches="tight")
     plt.close(fig)
-    print("   📄  Page saved: 3-panel comparison")
+    print("     Page saved: 3-panel comparison")
 
     # ── Page 6 : Best model per FS method overlay ──────────
     fig, ax = plt.subplots(figsize=(9, 8))
@@ -601,19 +584,10 @@ with PdfPages(ROC_PDF) as pdf:
     d["Title"]   = "RNA-seq ML Pipeline – ROC Curves"
     d["Subject"] = "Feature Selection & Classification"
 
-print(f"✅  ROC PDF saved → '{ROC_PDF}'  (6 pages)")
+print(f"  ROC PDF saved → '{ROC_PDF}'  (6 pages)")
 
 # ════════════════════════════════════════════════════════════
 #  STEP 8B : Comparison Plots PDF
-#  Pages:
-#    1  – Cover
-#    2  – Performance heatmaps (all 3 FS methods)
-#    3  – Grouped bar chart: ROC-AUC across models & methods
-#    4  – Grouped bar chart: Accuracy
-#    5  – Grouped bar chart: F1-Score
-#    6  – Grouped bar chart: Sensitivity & Specificity
-#    7  – CV AUC vs Test AUC (overfitting diagnostic)
-#    8  – Radar / spider chart: best model per FS method
 # ════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print("  STEP 8B – Comparison Plots PDF")
@@ -915,6 +889,32 @@ with pd.ExcelWriter(RESULTS_OUTPUT, engine="xlsxwriter") as writer:
                 ws_c.write(row,c,v, sfmt(v, is_gap=(m=="Gap(Test-CV)")))
             row+=1
 
+# <-- ADDED: Export the Best Genes for the Winning Models
+    ws_g = wb.add_worksheet("Best_Model_Genes")
+    ws_g.merge_range(0, 0, 0, 3, "Specific Genes Selected by the Winning Models", hdr)
+    ws_g.write(1, 0, "FS Method", sub)
+    ws_g.write(1, 1, "Best Model", sub)
+    ws_g.write(1, 2, "Test AUC", sub)
+    ws_g.write(1, 3, "Genes Selected by this Pipeline", sub)
+    ws_g.set_column(0, 0, 25); ws_g.set_column(1, 1, 26)
+    ws_g.set_column(2, 2, 12); ws_g.set_column(3, 3, 120)
+    
+    g_row = 2
+    for fs_name, results in all_results.items():
+        for mname, metrics in results.items():
+            auc_val = metrics.get("ROC_AUC", 0)
+            
+            # Retrieve the genes saved during pipe.fit() in Step 7
+            genes = pipeline_selected_genes.get(fs_name, {}).get(mname, [])
+            gene_str = ", ".join(genes) if genes else "Failed/No genes selected"
+            
+            ws_g.write(g_row, 0, fs_name, cellfm)
+            ws_g.write(g_row, 1, mname, cellfm)
+            ws_g.write(g_row, 2, auc_val, sfmt(auc_val))
+            ws_g.write(g_row, 3, gene_str, cellfm)
+            g_row += 1
+    # -------------------------------------------------------------
+
     # Overfitting legend sheet
     ws_l = wb.add_worksheet("Legend")
     legend = [
@@ -950,28 +950,3 @@ for f in outputs:
 print("\n" + "=" * 60)
 print("  ✅  PIPELINE COMPLETE")
 print("=" * 60)
-print("""
-  Output files:
-  ┌──────────────────────────────────────────────────────────┐
-  │  Feature_Selection_Results.xlsx                          │
-  │  ML_Model_Results.xlsx  (Gap column, colour-coded)       │
-  ├──────────────────────────────────────────────────────────┤
-  │  ROC_Curves.pdf  (6 pages)                               │
-  │    p1  Cover                                             │
-  │    p2  Filter ROC — all 9 models                         │
-  │    p3  Wrapper ROC — all 9 models                        │
-  │    p4  Embedded ROC — all 9 models                       │
-  │    p5  3-panel side-by-side comparison                   │
-  │    p6  Best-model overlay (one curve per FS method)      │
-  ├──────────────────────────────────────────────────────────┤
-  │  Comparison_Plots.pdf  (8 pages)                         │
-  │    p1  Cover                                             │
-  │    p2  Performance heatmaps                              │
-  │    p3  ROC-AUC grouped bar chart                         │
-  │    p4  Accuracy grouped bar chart                        │
-  │    p5  F1-Score grouped bar chart                        │
-  │    p6  Sensitivity & Specificity                         │
-  │    p7  Overfitting diagnostic (CV vs Test AUC)           │
-  │    p8  Radar chart — best model per FS method            │
-  └──────────────────────────────────────────────────────────┘
-""")
